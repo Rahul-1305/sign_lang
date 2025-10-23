@@ -1,0 +1,2 @@
+- [x] Update Login.jsx to handle API response, store token, update auth context, and add sign in link
+- [x] Update AuthContext.jsx to persist token in localStorage on login and remove on logout

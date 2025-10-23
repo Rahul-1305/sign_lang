@@ -7,47 +7,49 @@ import traceback
 import pyttsx3
 from keras.models import load_model
 from cvzone.HandTrackingModule import HandDetector
-from string import ascii_uppercase
-import enchant
 import tkinter as tk
 from PIL import Image, ImageTk
+import time
+import enchant
 
 # Set language for enchant dictionary
-# ddd = enchant.Dict("en-US")  # Use this if you want to explicitly set en-US
-ddd = enchant.get_default_language()  # Use default system language
-hd = HandDetector(maxHands=1)
-hd2 = HandDetector(maxHands=1)
+ddd = enchant.Dict("en_US")
+
+# Initialize hand detectors with higher confidence
+hd = HandDetector(maxHands=1, detectionCon=0.85)
+hd2 = HandDetector(maxHands=1, detectionCon=0.85)
 
 offset = 29
-
-# Set environment variable for CUDA (optional, only needed for Theano, not TensorFlow)
-os.environ["THEANO_FLAGS"] = "device=cuda, assert_no_cpu_op=True"
 
 # Application Class
 class Application:
     def __init__(self):
-        self.vs = cv2.VideoCapture(0)  # Initialize webcam
+        self.vs = cv2.VideoCapture(0)
         self.current_image = None
-        self.model = load_model('./cnn8grps_rad1_model.h5')  # Load pre-trained model
+        self.model = load_model('./cnn8grps_rad1_model.h5')
+        self.input_h, self.input_w = self.model.input_shape[1], self.model.input_shape[2]
+        print(f"Loaded model from disk. input_shape = {self.model.input_shape}")
+        
         self.speak_engine = pyttsx3.init()
         self.speak_engine.setProperty("rate", 100)
         voices = self.speak_engine.getProperty("voices")
         self.speak_engine.setProperty("voice", voices[0].id)
 
         # Initialize counters and flags
-        self.ct = {}
-        self.ct['blank'] = 0
-        self.blank_flag = 0
-        self.space_flag = False
-        self.next_flag = True
         self.prev_char = ""
         self.count = -1
         self.ten_prev_char = [" " for _ in range(10)]
 
-        for i in ascii_uppercase:
-            self.ct[i] = 0
+        # Stability variables
+        self.last_pred = None
+        self.pred_count = 0
+        self.appended = False
+        self.confidence_threshold = 0.8
+        self.stability_threshold = 3
 
-        print("Loaded model from disk")
+        # Hand visibility for space
+        self.hand_visible = False
+        self.space_added = True  # Start as true to avoid initial space
 
         # Set up Tkinter GUI
         self.root = tk.Tk()
@@ -55,19 +57,18 @@ class Application:
         self.root.protocol('WM_DELETE_WINDOW', self.destructor)
         self.root.geometry("1300x700")
 
-        self.panel = tk.Label(self.root)  # Webcam feed panel
+        self.panel = tk.Label(self.root)  # Webcam feed
         self.panel.place(x=40, y=3, width=480, height=640)
 
-        self.panel2 = tk.Label(self.root)  # Hand skeleton panel
+        self.panel2 = tk.Label(self.root)  # Hand skeleton
         self.panel2.place(x=550, y=115, width=400, height=400)
 
-        self.T = tk.Label(self.root)
+        self.T = tk.Label(self.root, text="Sign Language To Text Conversion", font=("Times New Roman", 30, "bold"))
         self.T.place(x=60, y=5)
-        self.T.config(text="Sign Language To Text Conversion", font=("Times New Roman", 30, "bold"))
 
-        # Load and display sign language reference image
+        # Sign language reference image
         image1 = Image.open("signs.png")
-        image1 = image1.resize((500, 400), Image.LANCZOS)  # Updated to use LANCZOS instead of ANTIALIAS
+        image1 = image1.resize((500, 400), Image.LANCZOS)
         test = ImageTk.PhotoImage(image1)
         label1 = tk.Label(image=test)
         label1.image = test
@@ -76,175 +77,202 @@ class Application:
         self.panel3 = tk.Label(self.root)  # Current Symbol
         self.panel3.place(x=280, y=585)
 
-        self.T1 = tk.Label(self.root)
+        self.T1 = tk.Label(self.root, text="Character :", font=("Times New Roman", 30, "bold"))
         self.T1.place(x=10, y=580)
-        self.T1.config(text="Character :", font=("Times New Roman", 30, "bold"))
 
         self.panel5 = tk.Label(self.root)  # Sentence
         self.panel5.place(x=260, y=632)
 
-        self.T3 = tk.Label(self.root)
+        self.T3 = tk.Label(self.root, text="Sentence :", font=("Times New Roman", 30, "bold"))
         self.T3.place(x=10, y=632)
-        self.T3.config(text="Sentence :", font=("Times New Roman", 30, "bold"))
 
-        self.T4 = tk.Label(self.root)
+        self.T4 = tk.Label(self.root, text="Suggestions :", fg="red", font=("Times New Roman", 30, "bold"))
         self.T4.place(x=10, y=700)
-        self.T4.config(text="Suggestions :", fg="red", font=("Times New Roman", 30, "bold"))
 
         # Suggestion buttons
-        self.b1 = tk.Button(self.root)
+        self.b1 = tk.Button(self.root, font=("Times New Roman", 20), wraplength=825, command=self.action1)
         self.b1.place(x=390, y=700)
 
-        self.b2 = tk.Button(self.root)
+        self.b2 = tk.Button(self.root, font=("Times New Roman", 20), wraplength=825, command=self.action2)
         self.b2.place(x=590, y=700)
 
-        self.b3 = tk.Button(self.root)
+        self.b3 = tk.Button(self.root, font=("Times New Roman", 20), wraplength=825, command=self.action3)
         self.b3.place(x=790, y=700)
 
-        self.b4 = tk.Button(self.root)
+        self.b4 = tk.Button(self.root, font=("Times New Roman", 20), wraplength=825, command=self.action4)
         self.b4.place(x=990, y=700)
 
-        self.speak = tk.Button(self.root)
+        self.speak = tk.Button(self.root, text="Speak", font=("Times New Roman", 20), wraplength=100, command=self.speak_fun)
         self.speak.place(x=1305, y=630)
-        self.speak.config(text="Speak", font=("Times New Roman", 20), wraplength=100, command=self.speak_fun)
 
-        self.clear = tk.Button(self.root)
+        self.clear = tk.Button(self.root, text="Clear", font=("Times New Roman", 20), wraplength=100, command=self.clear_fun)
         self.clear.place(x=1205, y=630)
-        self.clear.config(text="Clear", font=("Times New Roman", 20), wraplength=100, command=self.clear_fun)
 
-        self.str = " "
-        self.ccc = 0
-        self.word = " "
-        self.current_symbol = "C"
-        self.photo = "Empty"
+        self.sentence = ""
+        self.word = ""
+        self.current_symbol = ""
+        self.word1 = self.word2 = self.word3 = self.word4 = ""
 
-        self.word1 = " "
-        self.word2 = " "
-        self.word3 = " "
-        self.word4 = " "
-
+        self.last_frame_time = time.time()
         self.video_loop()
 
     def video_loop(self):
         try:
+            current_time = time.time()
+            if current_time - self.last_frame_time < 0.2:
+                self.root.after(10, self.video_loop)
+                return
+            self.last_frame_time = current_time
+
             ok, frame = self.vs.read()
+            if not ok:
+                self.root.after(200, self.video_loop)
+                return
+
             cv2image = cv2.flip(frame, 1)
-            hands = hd.findHands(cv2image, draw=False, flipType=True)
-            cv2image_copy = np.array(cv2image)
+            hands_res = hd.findHands(cv2image, draw=False, flipType=True)
+            hands = hands_res[0] if isinstance(hands_res, tuple) and len(hands_res) > 0 else []
+
+            cv2image_copy = cv2image.copy()
             cv2image = cv2.cvtColor(cv2image, cv2.COLOR_BGR2RGB)
             self.current_image = Image.fromarray(cv2image)
             imgtk = ImageTk.PhotoImage(image=self.current_image)
             self.panel.imgtk = imgtk
             self.panel.config(image=imgtk)
 
-            if hands:
+            hand_detected = bool(hands)
+
+            if hand_detected:
+                self.hand_visible = True
+                self.space_added = False
                 hand = hands[0]
                 x, y, w, h = hand['bbox']
-                image = cv2image_copy[y - offset:y + h + offset, x - offset:x + w + offset]
+                img_height, img_width = cv2image_copy.shape[:2]
+                x1 = max(0, x - offset)
+                y1 = max(0, y - offset)
+                x2 = min(img_width, x + w + offset)
+                y2 = min(img_height, y + h + offset)
 
-                white = cv2.imread("./white.jpg")
-                handz = hd2.findHands(image, draw=False, flipType=True)
-                print(" ", self.ccc)
-                self.ccc += 1
-                if handz:
-                    hand = handz[0]
-                    self.pts = hand['lmList']
+                if x2 > x1 and y2 > y1:
+                    image = cv2image_copy[y1:y2, x1:x2]
 
-                    os = ((400 - w) // 2) - 15
-                    os1 = ((400 - h) // 2) - 15
-                    for t in range(0, 4, 1):
-                        cv2.line(white, (self.pts[t][0] + os, self.pts[t][1] + os1), (self.pts[t + 1][0] + os, self.pts[t + 1][1] + os1),
-                                 (0, 255, 0), 3)
-                    for t in range(5, 8, 1):
-                        cv2.line(white, (self.pts[t][0] + os, self.pts[t][1] + os1), (self.pts[t + 1][0] + os, self.pts[t + 1][1] + os1),
-                                 (0, 255, 0), 3)
-                    for t in range(9, 12, 1):
-                        cv2.line(white, (self.pts[t][0] + os, self.pts[t][1] + os1), (self.pts[t + 1][0] + os, self.pts[t + 1][1] + os1),
-                                 (0, 255, 0), 3)
-                    for t in range(13, 16, 1):
-                        cv2.line(white, (self.pts[t][0] + os, self.pts[t][1] + os1), (self.pts[t + 1][0] + os, self.pts[t + 1][1] + os1),
-                                 (0, 255, 0), 3)
-                    for t in range(17, 20, 1):
-                        cv2.line(white, (self.pts[t][0] + os, self.pts[t][1] + os1), (self.pts[t + 1][0] + os, self.pts[t + 1][1] + os1),
-                                 (0, 255, 0), 3)
-                    cv2.line(white, (self.pts[5][0] + os, self.pts[5][1] + os1), (self.pts[9][0] + os, self.pts[9][1] + os1), (0, 255, 0),
-                             3)
-                    cv2.line(white, (self.pts[9][0] + os, self.pts[9][1] + os1), (self.pts[13][0] + os, self.pts[13][1] + os1), (0, 255, 0),
-                             3)
-                    cv2.line(white, (self.pts[13][0] + os, self.pts[13][1] + os1), (self.pts[17][0] + os, self.pts[17][1] + os1),
-                             (0, 255, 0), 3)
-                    cv2.line(white, (self.pts[0][0] + os, self.pts[0][1] + os1), (self.pts[5][0] + os, self.pts[5][1] + os1), (0, 255, 0),
-                             3)
-                    cv2.line(white, (self.pts[0][0] + os, self.pts[0][1] + os1), (self.pts[17][0] + os, self.pts[17][1] + os1), (0, 255, 0),
-                             3)
+                    white = np.ones((400, 400, 3), np.uint8) * 255
+                    handz_res = hd2.findHands(image, draw=False, flipType=True)
+                    handz = handz_res[0] if isinstance(handz_res, tuple) and len(handz_res) > 0 else []
 
-                    for i in range(21):
-                        cv2.circle(white, (self.pts[i][0] + os, self.pts[i][1] + os1), 2, (0, 0, 255), 1)
+                    if handz:
+                        hand = handz[0]
+                        self.pts = hand['lmList']
+                        os_ = ((400 - w) // 2) - 15
+                        os1 = ((400 - h) // 2) - 15
 
-                    res = white
-                    self.predict(res)
+                        # Draw finger connections (thumb to pinky)
+                        for start, end in [(1,2),(2,3),(3,4),(5,6),(6,7),(7,8),(9,10),(10,11),(11,12),(13,14),(14,15),(15,16),(17,18),(18,19),(19,20)]:
+                            cv2.line(white, (self.pts[start][0] + os_, self.pts[start][1] + os1),
+                                     (self.pts[end][0] + os_, self.pts[end][1] + os1), (0, 255, 0), 3)
 
-                    self.current_image2 = Image.fromarray(res)
-                    imgtk = ImageTk.PhotoImage(image=self.current_image2)
-                    self.panel2.imgtk = imgtk
-                    self.panel2.config(image=imgtk)
+                        # Draw palm connections
+                        for conn in [(0,1),(0,5),(5,9),(9,13),(13,17),(17,0),(0,17)]:
+                            cv2.line(white, (self.pts[conn[0]][0] + os_, self.pts[conn[0]][1] + os1),
+                                     (self.pts[conn[1]][0] + os_, self.pts[conn[1]][1] + os1), (0, 255, 0), 3)
 
-                    self.panel3.config(text=self.current_symbol, font=("Times New Roman", 30))
-                    self.b1.config(text=self.word1, font=("Times New Roman", 20), wraplength=825, command=self.action1)
-                    self.b2.config(text=self.word2, font=("Times New Roman", 20), wraplength=825, command=self.action2)
-                    self.b3.config(text=self.word3, font=("Times New Roman", 20), wraplength=825, command=self.action3)
-                    self.b4.config(text=self.word4, font=("Times New Roman", 20), wraplength=825, command=self.action4)
+                        # Draw landmarks
+                        for i in range(21):
+                            cv2.circle(white, (self.pts[i][0] + os_, self.pts[i][1] + os1), 3, (0, 0, 255), -1)
 
-            self.panel5.config(text=self.str, font=("Times New Roman", 30), wraplength=1025)
+                        res = white
+                        predicted = self.predict(res)
+                        if predicted:
+                            self.current_symbol = predicted
+                            self.panel3.config(text=self.current_symbol, font=("Times New Roman", 30))
+
+                        self.current_image2 = Image.fromarray(res)
+                        imgtk = ImageTk.PhotoImage(image=self.current_image2)
+                        self.panel2.imgtk = imgtk
+                        self.panel2.config(image=imgtk)
+                else:
+                    hand_detected = False
+
+            if not hand_detected:
+                if self.hand_visible and not self.space_added and self.sentence and self.sentence[-1] != " ":
+                    self.sentence += " "
+                    self.space_added = True
+                self.hand_visible = False
+                self.clear_panel2()
+
+            self.update_suggestions()
+            self.b1.config(text=self.word1)
+            self.b2.config(text=self.word2)
+            self.b3.config(text=self.word3)
+            self.b4.config(text=self.word4)
+
+            self.panel5.config(text=self.sentence, font=("Times New Roman", 30), wraplength=1025)
         except Exception:
-            print("==", traceback.format_exc())
+            print("Error:", traceback.format_exc())
         finally:
-            self.root.after(1, self.video_loop)
+            self.root.after(200, self.video_loop)
+
+    def clear_panel2(self):
+        blank = Image.new('RGB', (400, 400), (255, 255, 255))
+        imgtk_blank = ImageTk.PhotoImage(image=blank)
+        self.panel2.imgtk = imgtk_blank
+        self.panel2.config(image=imgtk_blank)
+        self.current_symbol = ""
+        self.panel3.config(text=self.current_symbol, font=("Times New Roman", 30))
 
     def distance(self, x, y):
         return math.sqrt(((x[0] - y[0]) ** 2) + ((x[1] - y[1]) ** 2))
 
     def action1(self):
-        idx_space = self.str.rfind(" ")
-        idx_word = self.str.find(self.word, idx_space)
-        self.str = self.str[:idx_word] + self.word1.upper()
+        self.replace_word(self.word1)
 
     def action2(self):
-        idx_space = self.str.rfind(" ")
-        idx_word = self.str.find(self.word, idx_space)
-        self.str = self.str[:idx_word] + self.word2.upper()
+        self.replace_word(self.word2)
 
     def action3(self):
-        idx_space = self.str.rfind(" ")
-        idx_word = self.str.find(self.word, idx_space)
-        self.str = self.str[:idx_word] + self.word3.upper()
+        self.replace_word(self.word3)
 
     def action4(self):
-        idx_space = self.str.rfind(" ")
-        idx_word = self.str.find(self.word, idx_space)
-        self.str = self.str[:idx_word] + self.word4.upper()
+        self.replace_word(self.word4)
+
+    def replace_word(self, new_word):
+        if self.word and new_word:
+            idx = self.sentence.rfind(self.word)
+            if idx != -1:
+                self.sentence = self.sentence[:idx] + new_word.upper() + self.sentence[idx + len(self.word):]
 
     def speak_fun(self):
-        self.speak_engine.say(self.str)
+        self.speak_engine.say(self.sentence)
         self.speak_engine.runAndWait()
 
     def clear_fun(self):
-        self.str = " "
-        self.word1 = " "
-        self.word2 = " "
-        self.word3 = " "
-        self.word4 = " "
+        self.sentence = ""
+        self.word1 = self.word2 = self.word3 = self.word4 = ""
+        self.space_added = True
 
     def predict(self, test_image):
-        white = test_image
-        white = white.reshape(1, 400, 400, 3)
-        prob = np.array(self.model.predict(white)[0], dtype='float32')
-        ch1 = np.argmax(prob, axis=0)
+        img = test_image.copy()
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        img = cv2.resize(img, (self.input_w, self.input_h))
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        inp = img_rgb.astype('float32') / 255.0
+        inp = np.expand_dims(inp, axis=0)
+
+        preds = self.model.predict(inp)[0]
+        max_prob = np.max(preds)
+        if max_prob < self.confidence_threshold:
+            return None
+
+        ch1_idx = int(np.argmax(preds))
+        ch1 = ch1_idx
+
+        # Refinement logic
+        prob = preds.copy()
         prob[ch1] = 0
-        ch2 = np.argmax(prob, axis=0)
+        ch2 = int(np.argmax(prob))
         prob[ch2] = 0
-        ch3 = np.argmax(prob, axis=0)
-        prob[ch3] = 0
+        ch3 = int(np.argmax(prob))
 
         pl = [ch1, ch2]
 
@@ -261,7 +289,6 @@ class Application:
         if pl in l:
             if (self.pts[5][0] < self.pts[4][0]):
                 ch1 = 0
-                print("++++++++++++++++++")
 
         # Condition for [c0][aemnst]
         l = [[0, 0], [0, 6], [0, 2], [0, 5], [0, 1], [0, 7], [5, 2], [7, 6], [7, 1]]
@@ -283,7 +310,6 @@ class Application:
         if pl in l:
             if self.pts[6][1] > self.pts[8][1] and self.pts[14][1] < self.pts[16][1] and self.pts[18][1] < self.pts[20][1] and self.pts[0][0] < self.pts[8][0] and self.pts[0][0] < self.pts[12][0] and self.pts[0][0] < self.pts[16][0] and self.pts[0][0] < self.pts[20][0]:
                 ch1 = 3
-                print("33333c")
 
         # Condition for [gh][l]
         l = [[4, 6], [4, 1], [4, 5], [4, 3], [4, 7]]
@@ -291,7 +317,6 @@ class Application:
         if pl in l:
             if self.pts[4][0] > self.pts[0][0]:
                 ch1 = 3
-                print("33333b")
 
         # Condition for [gh][pqz]
         l = [[5, 3], [5, 0], [5, 7], [5, 4], [5, 2], [5, 1], [5, 5]]
@@ -299,7 +324,6 @@ class Application:
         if pl in l:
             if self.pts[2][1] + 15 < self.pts[16][1]:
                 ch1 = 3
-                print("33333a")
 
         # Condition for [l][x]
         l = [[6, 4], [6, 1], [6, 2]]
@@ -337,7 +361,6 @@ class Application:
         if pl in l:
             if (self.pts[6][1] > self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] < self.pts[16][1] and self.pts[18][1] < self.pts[20][1]) and self.pts[4][1] > self.pts[10][1]:
                 ch1 = 5
-                print("55555b")
 
         # Condition for [gh][pq]
         l = [[3, 2], [3, 1], [3, 6]]
@@ -345,7 +368,6 @@ class Application:
         if pl in l:
             if self.pts[4][1] + 17 > self.pts[8][1] and self.pts[4][1] + 17 > self.pts[12][1] and self.pts[4][1] + 17 > self.pts[16][1] and self.pts[4][1] + 17 > self.pts[20][1]:
                 ch1 = 5
-                print("55555a")
 
         # Condition for [l][pqz]
         l = [[4, 4], [4, 5], [4, 2], [7, 5], [7, 6], [7, 0]]
@@ -388,7 +410,6 @@ class Application:
         if pl in l:
             if self.pts[5][0] > self.pts[16][0]:
                 ch1 = 6
-                print("666661")
 
         # Condition for [yj][x]
         l = [[7, 2]]
@@ -396,7 +417,6 @@ class Application:
         if pl in l:
             if self.pts[18][1] < self.pts[20][1] and self.pts[8][1] < self.pts[10][1]:
                 ch1 = 6
-                print("666662")
 
         # Condition for [c0][x]
         l = [[2, 1], [2, 2], [2, 6], [2, 7], [2, 0]]
@@ -404,7 +424,6 @@ class Application:
         if pl in l:
             if self.distance(self.pts[8], self.pts[16]) > 50:
                 ch1 = 6
-                print("666663")
 
         # Condition for [l][x]
         l = [[4, 6], [4, 2], [4, 1], [4, 4]]
@@ -412,7 +431,6 @@ class Application:
         if pl in l:
             if self.distance(self.pts[4], self.pts[11]) < 60:
                 ch1 = 6
-                print("666664")
 
         # Condition for [x][d]
         l = [[1, 4], [1, 6], [1, 0], [1, 2]]
@@ -420,7 +438,6 @@ class Application:
         if pl in l:
             if self.pts[5][0] - self.pts[4][0] - 15 > 0:
                 ch1 = 6
-                print("666665")
 
         # Condition for [b][pqz]
         l = [[5, 0], [5, 1], [5, 4], [5, 5], [5, 6], [6, 1], [7, 6], [0, 2], [7, 1], [7, 4], [6, 6], [7, 2], [5, 0],
@@ -429,7 +446,6 @@ class Application:
         if pl in l:
             if (self.pts[6][1] > self.pts[8][1] and self.pts[10][1] > self.pts[12][1] and self.pts[14][1] > self.pts[16][1] and self.pts[18][1] > self.pts[20][1]):
                 ch1 = 1
-                print("111111")
 
         # Condition for [f][pqz]
         l = [[6, 1], [6, 0], [0, 3], [6, 4], [2, 2], [0, 6], [6, 2], [7, 6], [4, 6], [4, 1], [4, 2], [0, 2], [7, 1],
@@ -439,7 +455,6 @@ class Application:
             if (self.pts[6][1] < self.pts[8][1] and self.pts[10][1] > self.pts[12][1] and self.pts[14][1] > self.pts[16][1] and
                     self.pts[18][1] > self.pts[20][1]):
                 ch1 = 1
-                print("111112")
 
         l = [[6, 1], [6, 0], [4, 2], [4, 1], [4, 6], [4, 4]]
         pl = [ch1, ch2]
@@ -447,7 +462,6 @@ class Application:
             if (self.pts[10][1] > self.pts[12][1] and self.pts[14][1] > self.pts[16][1] and
                     self.pts[18][1] > self.pts[20][1]):
                 ch1 = 1
-                print("111112")
 
         # Condition for [d][pqz]
         l = [[5, 0], [3, 4], [3, 0], [3, 1], [3, 5], [5, 5], [5, 4], [5, 1], [7, 6]]
@@ -456,7 +470,6 @@ class Application:
             if ((self.pts[6][1] > self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] < self.pts[16][1] and
                  self.pts[18][1] < self.pts[20][1]) and (self.pts[2][0] < self.pts[0][0]) and self.pts[4][1] > self.pts[14][1]):
                 ch1 = 1
-                print("111113")
 
         l = [[4, 1], [4, 2], [4, 4]]
         pl = [ch1, ch2]
@@ -465,7 +478,6 @@ class Application:
                     self.pts[6][1] > self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] < self.pts[16][1] and self.pts[18][1] <
                     self.pts[20][1]):
                 ch1 = 1
-                print("1111993")
 
         l = [[3, 4], [3, 0], [3, 1], [3, 5], [3, 6]]
         pl = [ch1, ch2]
@@ -473,14 +485,12 @@ class Application:
             if ((self.pts[6][1] > self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] < self.pts[16][1] and
                  self.pts[18][1] < self.pts[20][1]) and (self.pts[2][0] < self.pts[0][0]) and self.pts[14][1] < self.pts[4][1]):
                 ch1 = 1
-                print("1111mmm3")
 
         l = [[6, 6], [6, 4], [6, 1], [6, 2]]
         pl = [ch1, ch2]
         if pl in l:
             if self.pts[5][0] - self.pts[4][0] - 15 < 0:
                 ch1 = 1
-                print("1111140")
 
         # Condition for [i][pqz]
         l = [[5, 4], [5, 5], [5, 1], [0, 3], [0, 7], [5, 0], [0, 2], [6, 2], [7, 5], [7, 1], [7, 6], [7, 7]]
@@ -489,7 +499,6 @@ class Application:
             if ((self.pts[6][1] < self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] < self.pts[16][1] and
                  self.pts[18][1] > self.pts[20][1])):
                 ch1 = 1
-                print("111114")
 
         # Condition for [yj][bfdi]
         l = [[1, 5], [1, 7], [1, 1], [1, 6], [1, 3], [1, 0]]
@@ -499,16 +508,14 @@ class Application:
                     self.pts[6][1] < self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] < self.pts[16][1] and
                     self.pts[18][1] > self.pts[20][1]):
                 ch1 = 7
-                print("111114lll;;p")
 
         # Condition for [uvr]
         l = [[5, 5], [5, 0], [5, 4], [5, 1], [4, 6], [4, 1], [7, 6], [3, 0], [3, 5]]
         pl = [ch1, ch2]
         if pl in l:
             if ((self.pts[6][1] > self.pts[8][1] and self.pts[10][1] > self.pts[12][1] and self.pts[14][1] < self.pts[16][1] and
-                 self.pts[18][1] < self.pts[20][1])) and self.pts[4][1] > self.pts[14][1]:
+                 self.pts[18][1] < self.pts[20][1])) and self.pts[4][1] < self.pts[9][1]:
                 ch1 = 1
-                print("111115")
 
         # Condition for [w]
         l = [[3, 5], [3, 0], [3, 6], [5, 1], [4, 1], [2, 0], [5, 0], [5, 5]]
@@ -518,7 +525,6 @@ class Application:
                     self.pts[0][0] + 13 < self.pts[20][0]) and not (
                     self.pts[0][0] > self.pts[8][0] and self.pts[0][0] > self.pts[12][0] and self.pts[0][0] > self.pts[16][0] and self.pts[0][0] > self.pts[20][0]) and self.distance(self.pts[4], self.pts[11]) < 50:
                 ch1 = 1
-                print("111116")
 
         # Condition for [w]
         l = [[5, 0], [5, 5], [0, 1]]
@@ -526,7 +532,6 @@ class Application:
         if pl in l:
             if self.pts[6][1] > self.pts[8][1] and self.pts[10][1] > self.pts[12][1] and self.pts[14][1] > self.pts[16][1]:
                 ch1 = 1
-                print("1117")
 
         # Conditions for subgroups
         if ch1 == 0:
@@ -616,51 +621,67 @@ class Application:
         if ch1 == "next" and self.prev_char != "next":
             if self.ten_prev_char[(self.count - 2) % 10] != "next":
                 if self.ten_prev_char[(self.count - 2) % 10] == "Backspace":
-                    self.str = self.str[:-1]
+                    self.sentence = self.sentence[:-1]
                 else:
                     if self.ten_prev_char[(self.count - 2) % 10] != "Backspace":
-                        self.str = self.str + self.ten_prev_char[(self.count - 2) % 10]
+                        self.sentence = self.sentence + self.ten_prev_char[(self.count - 2) % 10]
             else:
                 if self.ten_prev_char[(self.count - 0) % 10] != "Backspace":
-                    self.str = self.str + self.ten_prev_char[(self.count - 0) % 10]
+                    self.sentence = self.sentence + self.ten_prev_char[(self.count - 0) % 10]
 
-        if ch1 == "  " and self.prev_char != "  ":
-            self.str = self.str + "  "
+        if ch1 == " " and self.prev_char != " ":
+            self.sentence = self.sentence + " "
 
-        self.prev_char = ch1
-        self.current_symbol = ch1
-        self.count += 1
-        self.ten_prev_char[self.count % 10] = ch1
+        if ch1 == 'Backspace' and self.prev_char != 'Backspace':
+            if self.sentence:
+                self.sentence = self.sentence[:-1]
 
-        if len(self.str.strip()) != 0:
-            st = self.str.rfind(" ")
-            ed = len(self.str)
-            word = self.str[st + 1:ed]
-            self.word = word
-            print("----------word = ", word)
-            if len(word.strip()) != 0:
-                ddd.check(word)
-                lenn = len(ddd.suggest(word))
-                if lenn >= 4:
-                    self.word4 = ddd.suggest(word)[3]
-                if lenn >= 3:
-                    self.word3 = ddd.suggest(word)[2]
-                if lenn >= 2:
-                    self.word2 = ddd.suggest(word)[1]
-                if lenn >= 1:
-                    self.word1 = ddd.suggest(word)[0]
+        # Stability check for letters only
+        if isinstance(ch1, str) and len(ch1) == 1 and ch1.isalpha() and ch1.isupper():
+            if ch1 == self.last_pred:
+                self.pred_count += 1
             else:
-                self.word1 = " "
-                self.word2 = " "
-                self.word3 = " "
-                self.word4 = " "
+                self.last_pred = ch1
+                self.pred_count = 1
+                self.appended = False
+
+            if self.pred_count >= self.stability_threshold and not self.appended:
+                self.sentence += ch1
+                self.appended = True
+                self.prev_char = ch1
+                self.count += 1
+                self.ten_prev_char[self.count % 10] = ch1
+                return ch1
+        else:
+            self.pred_count = 0
+            self.appended = False
+
+        return None
+
+    def update_suggestions(self):
+        if not self.sentence.strip():
+            self.word1 = self.word2 = self.word3 = self.word4 = ""
+            return
+
+        st = self.sentence.rfind(" ")
+        word = self.sentence[st + 1:].strip()
+        self.word = word
+        if word:
+            suggestions = ddd.suggest(word)
+            lenn = len(suggestions)
+            self.word1 = suggestions[0] if lenn >= 1 else ""
+            self.word2 = suggestions[1] if lenn >= 2 else ""
+            self.word3 = suggestions[2] if lenn >= 3 else ""
+            self.word4 = suggestions[3] if lenn >= 4 else ""
+        else:
+            self.word1 = self.word2 = self.word3 = self.word4 = ""
 
     def destructor(self):
         print("Closing Application...")
-        print(self.ten_prev_char)
         self.root.destroy()
         self.vs.release()
         cv2.destroyAllWindows()
 
 print("Starting Application...")
-(Application()).root.mainloop()
+app = Application()
+app.root.mainloop()
